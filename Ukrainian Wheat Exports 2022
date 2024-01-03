@@ -1,0 +1,272 @@
+# 1. Install packages
+
+# Install devtools if not already installed
+if (!requireNamespace("devtools", quietly = TRUE)) {
+  install.packages("devtools")
+}
+
+# Force installation of comtradr from GitHub
+devtools::install_github(
+    "ropensci/comtradr@main",
+    force = TRUE  # Force installation
+)
+
+libs <- c(
+    "tidyverse", "comtradr", "giscoR", "sf", "sfheaders", "CoordinateCleaner"
+)
+installed_libs <- libs %in% rownames(
+    installed.packages()
+)
+
+if(any(!installed_libs)) {
+    install.packages(
+        libs[!installed_libs],
+        dependencies = TRUE
+    )
+}
+
+invisible(lapply(
+    libs, library,
+    character.only = TRUE
+))
+
+# 2. Get trade data
+
+comtradr::set_primary_comtrade_key(
+    "946d3088b1f24577b20a78f99e9db79e"
+)
+
+wheat_exports <- comtradr::ct_get_data(
+    commodity_code = "1001",
+    flow_direction = "export",
+    reporter = "UKR",
+    partner = "all_countries",
+    start_date = "2022",
+    end_date = "2022"
+)
+wheat_df <- wheat_exports |>
+    dplyr::select(
+        partner_iso,
+        qty
+    )
+
+# 3. Fetch Capitals
+
+data(countryref)
+head(countryref)
+
+capitals <- countryref |>
+    dplyr::filter(
+        !is.na(capital)
+    ) |> 
+    dplyr::group_by(
+        iso3, capital
+    ) |> 
+    dplyr::summarise_at(
+        vars(
+            capital.lon,
+            capital.lat
+        ), max
+    ) |>
+    dplyr::rename(
+        long = capital.lon,
+        lat = capital.lat
+    )
+
+# 4. starting/ending points
+
+end_coords <- wheat_df |>
+    dplyr::left_join(
+        capitals,
+        by = c("partner_iso" = "iso3")
+    ) |>
+    dplyr::select(
+        partner_iso,
+        qty,
+        long,
+        lat
+    ) |>
+    na.omit()
+
+start_coords <- capitals |>
+    dplyr::filter(
+        iso3 == "UKR"
+    ) |>
+    dplyr::group_by(iso3) |>
+    dplyr::slice(
+        rep(
+            1:max(nrow(end_coords)
+            ),
+            each = max(nrow(end_coords)
+            )
+        )
+    ) |>
+    dplyr::ungroup() |>
+    dplyr::select(long, lat)
+
+# 5. Generate Trade Lines
+start_coords$linestring_id <-
+end_coords$linestring_id <-
+seq_len(
+    nrow(
+        start_coords
+    )
+)
+wheat_lines_sf <- sfheaders::sf_linestring(
+    dplyr::bind_rows(
+        start_coords,
+        end_coords
+    ) |>
+    dplyr::arrange(
+        linestring_id
+    ),
+    x = "long",
+    y = "lat",
+    linestring_id = "linestring_id"
+) |>
+sf::st_set_crs(4326)
+
+wheat_lines_sf <- cbind(
+    wheat_lines_sf,
+    end_coords[
+        ,c("partner_iso", "qty")
+    ]
+)
+# 6. Import World Shapefile
+
+world_shp <- giscoR::gisco_get_countries(
+    resolution = "10"
+) |>
+subset(
+    NAME_ENGL != "Antartica"
+)
+
+# 7. Mapping
+
+crs_robinson <- "+proj=robin +lon_0=0w"
+
+wheat_points_sf <- end_coords |>
+    dplyr::group_by(partner_iso) |>
+    dplyr::arrange(
+    dplyr::desc(qty)
+    ) |>
+    dplyr::ungroup() |>
+    sf::st_as_sf(
+        coords = c("long", "lat"),
+        crs = 4326
+    )
+
+p <- ggplot() +
+geom_sf(
+    data = world_shp,
+    fill = "#063140",
+    color = "#18BFF2",
+    size = .2,
+    alpha = .35
+) +
+geom_sf(
+    data = wheat_lines_sf,
+    aes(
+        size = qty / 1000000,
+        alpha = qty / 1000000
+    ),
+    fill = "#ff6103",
+    color = "#ff6103"
+) +
+geom_sf(
+    data = wheat_points_sf,
+    aes(
+        size = qty / 1000000
+    ),
+    fill = "#ff6103",
+    color = "#ff6103",
+    alpha = 0.85,
+    stroke = 0.25
+) +
+scale_size(
+    name = "thousands of tonnes",
+    range = c(0.5, 2)
+) +
+scale_alpha(
+    range = c(0.25, 0.75)
+)+
+coord_sf(crs = crs_robinson) +
+guides(
+    alpha = "none",
+    size = guide_legend(
+        override.aes = list(
+            fill = NULL,
+            alpha = 0.85,
+            color = "#ff6103"
+        ),
+        direction = "horizontal",
+        keyheight = unit(1.5,"mm"),
+        keywidth = unit(15,"mm"),
+        title.position = "top",
+        title.hjust = 0.5,
+        label.hjust = 0.5,
+        label.position = "top",
+        nrow = 1,
+        byrow = T
+        )
+) +
+    labs(
+        x = "",
+        y = "",
+        subtitle = "",
+        title = "Wheat Imports from Ukraine in 2022",
+        caption = "United Nations, 2023. UN Comtrade
+        http://comtrade.un.org 
+       Nicholas Klobucar 2023"
+) +
+  theme_void() +
+  theme(
+    plot.background = element_rect(
+    fill = "#052833",
+    color = NA
+    ),
+  panel.background = element_rect(
+    fill = "#052833",
+    color = NA
+    ),
+        legend.background = element_rect(
+            fill = "#052833",
+            color = NA
+    ),
+        legend.position = c(.55, -.01),
+        panel.grid.major = element_line(
+            color = "#052833",
+            linewidth = 0
+    ),
+    plot.title = element_text(
+        size = 22,
+        color = "#ff6103",
+        hjust = 0.5,
+        vjust = 1   
+    ),
+    plot.caption = element_text(
+        size = 8,
+        color = "grey80",
+        hjust = 0.15,
+        vjust = 0 
+),
+ legend.title = element_text(
+        size = 10,
+        color = "#ff6103"
+ ),
+   legend.text = element_text(
+        size = 9,
+        color = "#ff6103"
+   ),
+   plot.margin = unit(
+    c(
+        t = 1, r = -2,
+        b = .5, l = -2
+    ), "lines"
+   )
+)
+print(p)
+setwd("~/Desktop")
+ggsave("ukraine.png", plot = p, width = 10, height = 6, dpi = 1000)
+
+)
